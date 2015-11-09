@@ -1,0 +1,40 @@
+---
+- hosts: localhost
+  gather_facts: False
+  sudo: False
+  tasks:
+
+    - name: check out required roles
+      delegate_to: localhost
+      connection: local
+      git:
+        repo: "{{ openstack_repository_prefix }}ansible-role-{{ item }}.git"
+        dest: roles/{{ item }}
+        update: yes
+      with_items:
+        - chrony
+        - docker
+        - mysql
+        - rabbitmq-server
+        - keystone
+        - glance
+        - nova-controller
+        - nova-compute-docker
+        - neutron-controller
+        - neutron-network
+        - horizon
+
+    - name: check out library needed for demo deployment from github.com
+      git:
+        repo:
+          '{{ openstack_repository_prefix }}openstack-ansible-modules.git'
+        dest: library/openstack-ansible-modules
+        update: yes
+
+    - name: clone docker image repositories to local system
+      git:
+        repo: "{{ item.repo }}"
+        version: "{{ item.version }}"
+        dest: conpaas/{{ item.dir }}
+        update: no
+      with_items: conpaas_docker_build_images

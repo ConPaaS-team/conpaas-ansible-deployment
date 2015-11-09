@@ -1,0 +1,556 @@
+---
+- hosts: localhost
+  become: False
+  sudo: False
+  gather_facts: False
+  tasks:
+
+    - name: confirm that ansible version meets requirements
+      fail:
+        msg: "Ansible version is {{ ansible_version.full }}; 1.9 is required"
+      when: ansible_version.full|version_compare('1.9', '<')
+
+
+- hosts: all:!maia01
+  environment: conpaas_http_proxy_environment
+  roles:
+    - chrony
+
+
+- hosts: controller:compute
+  environment: conpaas_http_proxy_environment
+  roles:
+    - docker
+
+
+- hosts: controller:compute
+  environment: conpaas_http_proxy_environment
+  tasks:
+
+    - name: ensure that login user is in the docker group
+      user:
+        name: "{{ ansible_ssh_user }}"
+        groups: docker
+        append: yes
+        state: present
+
+
+- hosts: controller
+  environment: conpaas_http_proxy_environment
+  roles:
+    - mysql
+    - rabbitmq-server
+    - keystone
+    - glance
+    - nova-controller
+    - neutron-controller
+    - horizon
+
+
+#- hosts: network
+#  environment: conpaas_http_proxy_environment
+#  tasks:
+
+#    - name: enable net.ipv4.ip_no_pmtu_disc in sysctl
+#      sysctl:
+#        name: net.ipv4.ip_no_pmtu_disc
+#        value: "1"
+#        state: present
+
+
+- hosts: network
+  environment: conpaas_http_proxy_environment
+  roles:
+    - neutron-network
+
+
+- hosts: compute
+  environment: conpaas_http_proxy_environment
+  roles:
+    - nova-compute-docker
+
+
+- hosts: controller:compute
+  environment: conpaas_http_proxy_environment
+  tags:
+    - dockerimages
+  tasks:
+
+    - name: ensure docker is configured to use http_proxy
+      lineinfile:
+        dest: /etc/default/docker
+        line: export http_proxy="{{ lookup('env', 'http_proxy') }}"
+        state: present
+      register: default_docker
+      when: ansible_distribution == 'Ubuntu'
+
+    - name: restart docker if necessary
+      command: service docker restart
+      when: default_docker|changed
+
+    - name: ensure docker pull images have been pulled
+      environment: conpaas_no_http_proxy_environment
+      command: docker pull "{{ item.name }}:{{ item.tag }}"
+      when: inventory_hostname in groups['{{ item.group }}']
+      with_items: conpaas_docker_pull_images
+      register: docker_image_pull
+      changed_when: -1 != docker_image_pull.stdout.find("Downloaded newer image")
+
+    - name: ensure docker image build directories exist
+      file:
+        path: "{{ item }}"
+        owner: "{{ ansible_ssh_user }}"
+        state: directory
+      with_items:
+        - "{{ ansible_env.PWD }}/.ansible_cache"
+        - "{{ ansible_env.PWD }}/.ansible_cache/dockerbuild"
+        - "{{ ansible_env.PWD }}/.ansible_cache/dockerbuild-sync"
+
+    - name: synchronize local repositories to remotes for sync tracking
+      synchronize:
+        src: "conpaas/{{ item.dir }}"
+        dest: "{{ ansible_env.PWD }}/.ansible_cache/dockerbuild-sync"
+        archive: no
+        checksum: yes
+        recursive: yes
+      when: inventory_hostname in groups['{{ item.group }}']
+      with_items: conpaas_docker_build_images
+      register: dockerbuild_sync
+
+    - name: synchronize local repositories to remotes for docker build
+      synchronize:
+        src: "conpaas/{{ item.dir }}"
+        dest: "{{ ansible_env.PWD }}/.ansible_cache/dockerbuild"
+        archive: no
+        checksum: yes
+        recursive: yes
+      when: dockerbuild_sync|changed and 
+            inventory_hostname in groups['{{ item.group }}']
+      with_items: conpaas_docker_build_images
+
+    - name: ensure that docker image builds are configured to use http_proxy
+      lineinfile:
+        dest: "{{ ansible_env.PWD }}/.ansible_cache/dockerbuild/{{ item.dir }}/{{ item.buildsub }}/Dockerfile"
+        line: ENV http_proxy={{ lookup('env', 'http_proxy') }}
+        insertafter: ^MAINTAINER
+        state: present
+      when: inventory_hostname in groups['{{ item.group }}']
+      with_items: conpaas_docker_build_images
+
+    - name: ensure that docker image builds are configured to use https_proxy
+      lineinfile:
+        dest: "{{ ansible_env.PWD }}/.ansible_cache/dockerbuild/{{ item.dir }}/{{ item.buildsub }}/Dockerfile"
+        line: ENV https_proxy={{ lookup('env', 'https_proxy') }}
+        insertafter: ^MAINTAINER
+        state: present
+      when: inventory_hostname in groups['{{ item.group }}']
+      with_items: conpaas_docker_build_images
+
+    - name: ensure that docker images are configured to NOT use http_proxy at runtime...
+      lineinfile:
+        dest: "{{ ansible_env.PWD }}/.ansible_cache/dockerbuild/{{ item.dir }}/{{ item.buildsub }}/Dockerfile"
+        line: ENV http_proxy=''
+        insertbefore: ^CMD
+        state: present
+      when: inventory_hostname in groups['{{ item.group }}']
+      with_items: conpaas_docker_build_images
+
+    - name: ensure that docker images are configured to NOT use https_proxy at runtime...
+      lineinfile:
+        dest: "{{ ansible_env.PWD }}/.ansible_cache/dockerbuild/{{ item.dir }}/{{ item.buildsub }}/Dockerfile"
+        line: ENV https_proxy=''
+        insertbefore: ^CMD
+        state: present
+      when: inventory_hostname in groups['{{ item.group }}']
+      with_items: conpaas_docker_build_images
+
+    - name: ensure docker build images have been built
+      environment: conpaas_no_http_proxy_environment
+      docker_image:
+        docker_api_version: '1.18'
+        name: "{{ item.name }}"
+        tag: "{{ item.tag }}"
+        path: "{{ ansible_env.PWD }}/.ansible_cache/dockerbuild/{{ item.dir }}/{{ item.buildsub }}"
+        state: present
+      when: inventory_hostname in groups['{{ item.group }}']
+      with_items: conpaas_docker_build_images
+      register: docker_image_build
+      until: docker_image_build|success
+      retries: 3
+      delay: 3
+
+
+# - hosts: compute
+#   environment: conpaas_http_proxy_environment
+#   tasks:
+
+#     - name: ensure required packages for hresmonagent are installed
+#       apt:
+#         pkg: "{{ item }}"
+#         state: latest
+#         update_cache: yes
+#         cache_valid_time: 600
+#       with_items:
+#         - python-bottle
+ 
+#     - name: clone hresmonagent repository
+#       git:
+#         repo: https://github.com/conpaas/hresmonagent.git
+#         dest: /hresmonagent
+#         update: no
+
+
+- hosts: all
+  gather_facts: True
+  tags:
+    - conpaas
+
+
+- hosts: controller
+  environment: conpaas_no_http_proxy_environment
+  tags:
+    - conpaas
+  tasks:
+
+    - name: update admin.openrc from template
+      template:
+        src: templates/admin.openrc
+        dest: "{{ ansible_env.PWD }}/admin.openrc"
+        owner: "{{ ansible_ssh_user }}"
+        mode: 0600
+
+    - name: create conpaas tenant
+      keystone_user:
+        endpoint: "{{ openstack_identity_admin_url }}"
+        token: "{{ openstack_identity_admin_token }}"
+        tenant: conpaas
+        tenant_description: "conpaas Tenant"
+
+    - name: create conpaas user
+      keystone_user:
+        endpoint: "{{ openstack_identity_admin_url }}"
+        token: "{{ openstack_identity_admin_token }}"
+        tenant: conpaas
+        user: conpaas
+        password: "{{ openstack_identity_conpaas_password }}"
+
+    - name: associate _member_ role with conpaas user
+      keystone_user:
+        endpoint: "{{ openstack_identity_admin_url }}"
+        token: "{{ openstack_identity_admin_token }}"
+        tenant: conpaas
+        user: conpaas
+        role: _member_
+
+    - name: update conpaas.openrc template
+      template:
+        src: templates/conpaas.openrc
+        dest: "{{ ansible_env.PWD }}/conpaas.openrc"
+        owner: "{{ ansible_ssh_user }}"
+        mode: 0600
+
+    - name: check to see what images have been registered with glance
+      command: glance --os-auth-url "{{ openstack_identity_public_url }}" --os-tenant-name conpaas --os-username conpaas --os-password "{{ openstack_identity_conpaas_password }}" image-list
+      register: glance_image_check
+      changed_when: false
+
+    - name: import conpaas/conpaas-director image into glance if necessary
+      shell: echo "docker save {{ item }}" | glance --os-auth-url "{{ openstack_identity_public_url }}" --os-tenant-name conpaas --os-username conpaas --os-password "{{ openstack_identity_conpaas_password }}" image-create --name={{ item }} --is-public=true --container-format=docker --disk-format=raw
+      when: -1 == glance_image_check.stdout.find("{{ item }}")
+      with_items:
+        - conpaas/baseimage-cloud
+        - conpaas/conpaas-director
+        - conpaas/conpaas-worker
+
+    - name: query glance for conpaas/conpaas-director image id
+      glance_image:
+        auth_url: "{{ openstack_identity_public_url }}"
+        login_tenant_name: conpaas
+        login_username: conpaas
+        login_password: "{{ openstack_identity_conpaas_password }}"
+        name: conpaas/conpaas-director
+        file: /tmp/dummy
+        state: present
+      register: conpaas_director_image
+ 
+    - name: query glance for conpaas/conpaas-worker image id
+      glance_image:
+        auth_url: "{{ openstack_identity_public_url }}"
+        login_tenant_name: conpaas
+        login_username: conpaas
+        login_password: "{{ openstack_identity_conpaas_password }}"
+        name: conpaas/conpaas-worker
+        file: /tmp/dummy
+        state: present
+      register: conpaas_worker_image
+    
+    # Ansible neutron modules lists all tenants to get ids, but this is not
+    # permitted for non-admin users. Need to fix neutron_* modules as non-admin
+    # *should* be able to create networks, associate floating ips, etc.
+
+    - name: ensure conpaas user has admin role
+      keystone_user:
+        endpoint: "{{ openstack_identity_admin_url }}"
+        token: "{{ openstack_identity_admin_token }}"
+        tenant: conpaas
+        user: conpaas
+        role: admin
+
+    - name: ensure internal network is registered
+      neutron_network:
+        auth_url: "{{ openstack_identity_public_url }}"
+        login_tenant_name: conpaas
+        login_username: conpaas
+        login_password: "{{ openstack_identity_conpaas_password }}"
+        tenant_name: conpaas
+        name: conpaas-net
+        state: present
+      register: openstack_network_internal
+
+    - name: ensure subnet internal network is registered
+      neutron_subnet:
+        auth_url: "{{ openstack_identity_public_url }}"
+        login_tenant_name: conpaas
+        login_username: conpaas
+        login_password: "{{ openstack_identity_conpaas_password }}"
+        tenant_name: conpaas
+        name: conpaas-subnet
+        network_name: conpaas-net
+        cidr: 192.168.13.0/24
+        enable_dhcp: true
+        gateway_ip: 192.168.13.1
+        dns_nameservers: 8.8.8.8,8.8.4.4
+        state: present
+
+    - name: ensure router exists
+      neutron_router:
+        auth_url: "{{ openstack_identity_public_url }}"
+        login_tenant_name: conpaas
+        login_username: conpaas
+        login_password: "{{ openstack_identity_conpaas_password }}"
+        tenant_name: conpaas
+        name: conpaas-router
+        state: present
+
+    - name: ensure router has interface connected to internal network
+      neutron_router_interface:
+        auth_url: "{{ openstack_identity_public_url }}"
+        login_tenant_name: conpaas
+        login_username: conpaas
+        login_password: "{{ openstack_identity_conpaas_password }}"
+        tenant_name: conpaas
+        router_name: conpaas-router
+        subnet_name: conpaas-subnet
+        state: present
+
+    - name: ensure router has external network gateway
+      neutron_router_gateway:
+        auth_url: "{{ openstack_identity_public_url }}"
+        login_tenant_name: conpaas
+        login_username: conpaas
+        login_password: "{{ openstack_identity_conpaas_password }}"
+        router_name: conpaas-router
+        network_name: public
+        state: present
+
+    - name: create ssh keypair
+      become_user: "{{ ansible_ssh_user }}"
+      command: ssh-keygen -q -f {{ ansible_env.PWD }}/.ssh/id_rsa -P ""
+               creates={{ ansible_env.PWD }}/.ssh/id_rsa
+
+    - name: capture public key in variable
+      command: cat {{ ansible_env.PWD }}/.ssh/id_rsa.pub
+      register: pubkey
+      changed_when: false
+
+    - name: add ssh keypair to nova
+      nova_keypair:
+        auth_url: "{{ openstack_identity_public_url }}"
+        login_tenant_name: conpaas
+        login_username: conpaas
+        login_password: "{{ openstack_identity_conpaas_password }}"
+        name: conpaas-keypair
+        public_key: "{{ pubkey.stdout }}"
+        state: present
+
+    # the neutron_sec_group module needs work...
+    
+    - name: verify existence of conpaas security group
+      command: neutron --os-auth-url "{{ openstack_identity_public_url }}" --os-tenant-name conpaas --os-username conpaas --os-password "{{ openstack_identity_conpaas_password }}" security-group-show conpaas-secgroup
+      register: verify_secgroup
+      ignore_errors: yes
+      changed_when: false
+    
+    - name: create conpaas-secgroup security group if necessary
+      command: neutron --os-auth-url "{{ openstack_identity_public_url }}" --os-tenant-name conpaas --os-username conpaas --os-password "{{ openstack_identity_conpaas_password }}" security-group-create conpaas-secgroup
+      when: verify_secgroup|failed
+   
+    - name: ensure that conpaas-secgroup allows ping
+      command: neutron --os-auth-url "{{ openstack_identity_public_url }}" --os-tenant-name conpaas --os-username conpaas --os-password "{{ openstack_identity_conpaas_password }}" security-group-rule-create --direction=ingress --protocol=icmp conpaas-secgroup
+      when: verify_secgroup|failed
+
+    - name: ensure that conpaas-secgroup allows ssh
+      command: neutron --os-auth-url "{{ openstack_identity_public_url }}" --os-tenant-name conpaas --os-username conpaas --os-password "{{ openstack_identity_conpaas_password }}" security-group-rule-create --direction=ingress --protocol=tcp --port-range-min=22 --port-range-max=22 conpaas-secgroup
+      when: verify_secgroup|failed
+
+    - name: ensure that conpaas-secgroup allows http
+      command: neutron --os-auth-url "{{ openstack_identity_public_url }}" --os-tenant-name conpaas --os-username conpaas --os-password "{{ openstack_identity_conpaas_password }}" security-group-rule-create --direction=ingress --protocol=tcp --port-range-min=80 --port-range-max=80 conpaas-secgroup
+      when: verify_secgroup|failed
+
+    - name: ensure that conpaas-secgroup allows https
+      command: neutron --os-auth-url "{{ openstack_identity_public_url }}" --os-tenant-name conpaas --os-username conpaas --os-password "{{ openstack_identity_conpaas_password }}" security-group-rule-create --direction=ingress --protocol=tcp --port-range-min=443 --port-range-max=443 conpaas-secgroup
+      when: verify_secgroup|failed
+
+    # - name: ensure that conpaas iaas services are running
+    #   docker:
+    #     name: conpaas-iaas-services
+    #     image: conpaas/iaas-deployment-docker-image
+    #     docker_api_version: '1.18'
+    #     net: bridge
+    #     env:
+    #       main_PASSWORD: "{{ openstack_identity_conpaas_password }}"
+    #       main_NOVA_ENDPOINT: "{{ openstack_compute_endpoint_host }}:5000"
+    #       CRS_DEFAULT_IMAGE: "{{ conpaas_worker_image.id }}"
+    #       network_UUID: "{{ openstack_network_internal.id }}"
+    #       overcommit_CPU_RATIO: "{{ openstack_compute_cpu_allocation_ratio|int }}"
+    #       overcommit_MEM_RATIO: "{{ openstack_compute_ram_allocation_ratio|int }}"
+    #       overcommit_DISK_RATIO: "{{ openstack_compute_disk_allocation_ratio|int }}"
+    #     ports:
+    #       - 7075:7075
+    #       - 8889:8889
+    #       - 56789:56789
+    #     state: started
+
+    # - name: ensure that /xtreemfs_data directory exists
+    #   file:
+    #     path: /xtreemfs_data
+    #     owner: root
+    #     group: root
+    #     mode: 0755
+    #     state: directory
+
+    # - name: ensure that conpaas xtreemfs configuration is updated from templates
+    #   template:
+    #     src: templates/xtreemfs_data/{{ item }}
+    #     dest: /xtreemfs_data/{{ item }}
+    #     owner: root
+    #     group: root
+    #     mode: 0644
+    #   with_items:
+    #     - dirconfig.properties
+    #     - irm.properties
+    #     - mrcconfig.properties
+    #     - osdconfig.properties
+    #     - schedulerconfig.properties
+    #     - scheduler.osd_capabilities
+
+    # - name: ensure that xtreemfs-osd service is running
+    #   docker:
+    #     name: xtreemfs-conpaas-osd
+    #     image: xtreemfs/xtreemfs-conpaas-osd
+    #     docker_api_version: '1.18'
+    #     net: bridge
+    #     expose:
+    #       - 32640
+    #     ports:
+    #       - 32640:32640
+    #     volumes:
+    #       - /xtreemfs_data:/xtreemfs_data:rw
+    #     state: started
+
+    # - name: ensure that xtreemfs-manager service is running
+    #   docker:
+    #     name: xtreemfs-conpaas-manager
+    #     image: xtreemfs/xtreemfs-conpaas-manager
+    #     docker_api_version: '1.18'
+    #     net: bridge
+    #     expose:
+    #       - 30080
+    #       - 32636
+    #       - 32638
+    #       - 32642
+    #     ports:
+    #       - 30080:30080
+    #       - 32636:32636
+    #       - 32638:32638
+    #       - 32642:32642
+    #     volumes:
+    #       - /xtreemfs_data:/xtreemfs_data:rw
+    #     state: started
+
+    - name: create a new conpaas-admin virtual machine instance
+      nova_compute:
+        auth_url: "{{ openstack_identity_public_url }}"
+        login_tenant_name: conpaas
+        login_username: conpaas
+        login_password: "{{ openstack_identity_conpaas_password }}"
+        name: conpaas-director
+        flavor_id: 2
+        image_id: "{{ conpaas_director_image.id }}"
+        nics:
+          - net-id: "{{ openstack_network_internal.id }}"
+        key_name: conpaas-keypair
+        security_groups: conpaas-secgroup
+        wait: "yes"
+        state: present
+        user_data: |
+          export HOME=/root
+          export DRIVER=openstack 
+          export HOST={{ openstack_controller_ip }}
+          export USER=conpaas
+          export PASSWORD={{ openstack_identity_conpaas_password }}
+          export SECGROUP=conpaas-secgroup
+          export KEYNAME=conpaas-keypair 
+          export SIZE_ID=m1.small
+          export CPS_USERNAME=test
+          export CPS_PASSWORD=password
+          export IP_PREFIX=192.168.13.
+          # export CRS_URL=http://{{ openstack_controller_ip }}:56789
+          export IMAGE_ID=conpaas/conpaas-worker
+          export NETWORK_ID=conpaas-net
+          export AUTO_ASSIGN_FLOATING_IP=false
+        availability_zone: 'host:{{ hostvars[groups.compute[0]].ansible_hostname }}'
+
+    - name: ensure floating ip is associated with vm instance
+      neutron_floating_ip:
+        auth_url: "{{ openstack_identity_public_url }}"
+        login_tenant_name: conpaas
+        login_username: conpaas
+        login_password: "{{ openstack_identity_conpaas_password }}"
+        instance_name: conpaas-director
+        network_name: public
+        state: present
+      register: conpaas_floating_ip
+
+    - name: ping conpaas virtual machine
+      command: ping -c 4 {{ conpaas_floating_ip.public_ip }}
+      changed_when: false
+      register: ping_conpaas_vm
+      until: ping_conpaas_vm|success
+      retries: 5
+      delay: 5
+
+    - name: wait for ssh to become available
+      wait_for:
+        delay: 10
+        host: "{{ conpaas_floating_ip.public_ip }}"
+        port: 22
+
+    - name: verify that virtual machine can be logged into via ssh
+      become_user: "{{ ansible_ssh_user }}"
+      command: ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no root@{{ conpaas_floating_ip.public_ip }} hostname
+      changed_when: false
+
+    - name: print success message
+      debug:
+        msg: >
+             Success! The playbook has completed and the install has passed
+             basic tests. The conpaas cloud should be ready for use.
+
+    # - name: display CRS url
+    #   debug:
+    #     msg: "CRS url: {{ conpaas_deployment_crs_url }}"
+
+    - name: display ConPaaS url
+      debug:
+        msg: "ConPaaS url: {{ conpaas_deployment_conpaas_url }}"

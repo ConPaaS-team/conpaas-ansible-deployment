@@ -1,0 +1,32 @@
+---
+openstack_run_dir: "{{ lookup('env', 'PWD') }}"
+openstack_identity_admin_token: >
+  {{ lookup('password', openstack_run_dir +
+                        '/private/credentials/keystone-admin-token
+                         length=20
+                         chars=ascii_letters,digits') }}
+
+openstack_identity_conpaas_password: password
+
+openstack_identity_region: RegionOne
+
+mysql_bind_address: "0.0.0.0"
+
+openstack_identity_admin_url: >
+  http://{{ openstack_identity_endpoint_host }}:35357/v2.0
+openstack_identity_public_url: >
+  http://{{ openstack_identity_endpoint_host }}:5000/v2.0
+
+openstack_compute_cpu_allocation_ratio: 16.0
+openstack_compute_ram_allocation_ratio: 10.0
+openstack_compute_disk_allocation_ratio: 10.0
+
+openstack_compute_quota_cores: -1
+openstack_compute_quota_fixed_ips: -1
+openstack_compute_quota_floating_ips: -1
+openstack_compute_quota_instances: -1
+openstack_compute_quota_key_pairs: -1
+openstack_compute_quota_ram: -1
+
+# harness_deployment_crs_url: "http://{{ ansible_fqdn }}:56789"
+conpaas_deployment_conpaas_url: "https://{{ conpaas_floating_ip.public_ip }}"

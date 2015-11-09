@@ -1,0 +1,61 @@
+---
+openstack_repository_prefix: "https://github.com/openstack-ansible/"
+
+openstack_controller_ip: "{{ hostvars[groups.controller[0]].ansible_default_ipv4.address }}"
+
+openstack_rabbitmq_host: "{{ openstack_controller_ip }}"
+openstack_mysql_host: "{{ openstack_controller_ip }}"
+
+openstack_identity_endpoint_host: "{{ openstack_controller_ip }}"
+openstack_image_endpoint_host: "{{ openstack_controller_ip }}"
+openstack_compute_endpoint_host: "{{ openstack_controller_ip }}"
+openstack_network_endpoint_host: "{{ openstack_controller_ip }}"
+
+conpaas_http_proxy_environment:
+    http_proxy: "{{ lookup('env', 'http_proxy') }}"
+    https_proxy: "{{ lookup('env', 'https_proxy') }}"
+
+
+conpaas_no_http_proxy_environment:
+    http_proxy: ''
+    HTTP_PROXY: ''
+    https_proxy: ''
+    HTTPS_PROXY: ''
+
+
+conpaas_docker_build_images:
+
+  # - name: conpaas/iaas-deployment-docker-image
+  #   tag: latest
+  #   repo: "https://github.com/harnesscloud/iaas-deployment-docker-image.git"
+  #   version: HEAD
+  #   dir: conpaas_iaas-deployment-docker-image 
+  #   buildsub: ''
+  #   group: controller
+
+  - name: conpaas/conpaas-director
+    tag: latest
+    repo: "https://github.com/ConPaaS-team/conpaas-docker-images.git"
+    version: HEAD
+    dir: conpaas_docker-conpaas-director 
+    buildsub: 'conpaas-director'
+    group: compute
+
+
+conpaas_docker_pull_images:
+
+  - name: conpaas/baseimage
+    tag: latest
+    group: compute
+
+  - name: conpaas/conpaas-worker
+    tag: latest
+    group: compute
+
+  # - name: xtreemfs/xtreemfs-harness-manager
+  #   tag: latest
+  #   group: controller
+
+  # - name: xtreemfs/xtreemfs-harness-osd
+  #   tag: latest
+  #   group: controller
