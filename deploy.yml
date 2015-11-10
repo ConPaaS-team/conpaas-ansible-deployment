@@ -45,6 +45,7 @@
     - nova-controller
     - neutron-controller
     - horizon
+    # - cinder
 
 
 #- hosts: network

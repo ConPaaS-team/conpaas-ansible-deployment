@@ -23,6 +23,7 @@
         - neutron-controller
         - neutron-network
         - horizon
+        # - cinder
 
     - name: check out library needed for demo deployment from github.com
       git:
